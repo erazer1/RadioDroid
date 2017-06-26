@@ -53,7 +53,7 @@ import net.programmierecke.radiodroid2.interfaces.IStreamProxyEventReceiver;
 
 import static android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT;
 
-public class PlayerService extends Service implements IStreamProxyEventReceiver {
+public class PlayerService extends Service implements IStreamProxyEventReceiver, AudioManager.OnAudioFocusChangeListener {
 	protected static final int NOTIFY_ID = 1;
 	public static final String PLAYER_SERVICE_TIMER_UPDATE = "net.programmierecke.radiodroid2.timerupdate";
 	public static final String PLAYER_SERVICE_STATUS_UPDATE = "net.programmierecke.radiodroid2.statusupdate";
@@ -345,41 +345,51 @@ public class PlayerService extends Service implements IStreamProxyEventReceiver 
 		itsStationURL = theURL;
 		this.useExo = useExo;
 
-		int result = audioManager.requestAudioFocus(afChangeListener,
-				// Use the music stream.
-				AudioManager.STREAM_MUSIC,
-				// Request permanent focus.
-				AudioManager.AUDIOFOCUS_GAIN);
+		int result = registerAudioFocus();
+
 		if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-			//am.registerMediaButtonEventReceiver(RemoteControlReceiver);
-			// Start playback.
 			ReplayCurrent(isAlarm);
-		}else{
-			ToastOnUi(R.string.error_grant_audiofocus);
+		}
+		else {
+			Log.e(TAG,"could not aquire audio focus");
+			ToastOnUi(R.string.error_play_stream);
 		}
 	}
 
-	AudioManager.OnAudioFocusChangeListener afChangeListener =
-			new AudioManager.OnAudioFocusChangeListener() {
-				public void onAudioFocusChange(int focusChange) {
-					if (focusChange == AUDIOFOCUS_LOSS_TRANSIENT) {
-						// Pause playback
-						if (itsMediaPlayer != null) {
-							itsMediaPlayer.pause();
-						}
-					} else if (focusChange == AudioManager.AUDIOFOCUS_GAIN) {
-						// Resume playback
-						if (itsMediaPlayer != null) {
-							itsMediaPlayer.start();
-						}
-					} else if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
-						//am.unregisterMediaButtonEventReceiver(RemoteControlReceiver);
-						audioManager.abandonAudioFocus(afChangeListener);
-						// Stop playback
-						Stop();
-					}
-				}
-			};
+	public void onAudioFocusChange(int focusChange) {
+		switch (focusChange) {
+			case AudioManager.AUDIOFOCUS_GAIN:
+				// resume playback
+				if (itsMediaPlayer != null && itsMediaPlayer.isPlaying())
+					itsMediaPlayer.setVolume(1.0f, 1.0f);
+				else
+					ReplayCurrent(false);
+				break;
+
+			case AudioManager.AUDIOFOCUS_LOSS:
+				// Lost focus for an unbounded amount of time: stop playback and release media player
+				// Stop does release listener - user must manually restart stream again
+				Stop();
+				break;
+
+			case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+				// Lost focus for a short time, but we have to stop
+				// playback. We don't release the media player because playback
+				// is likely to resume
+				//if (itsMediaPlayer.isPlaying()) itsMediaPlayer.pause();
+
+				// use internalStop because listener should not be freed!
+				internalStop();
+				break;
+
+			case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+				// Lost focus for a short time, but it's ok to keep playing
+				// at an attenuated level
+				if (itsMediaPlayer.isPlaying()) itsMediaPlayer.setVolume(0.1f, 0.1f);
+				break;
+		}
+	}
+
 
 	public void ReplayCurrent(final boolean isAlarm) {
 		liveInfo = null;
@@ -411,11 +421,11 @@ public class PlayerService extends Service implements IStreamProxyEventReceiver 
 			Log.e(TAG,"could not aquire wifi lock");
 		}
 
-		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN) {
+		//if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN) {
 			// use old MediaPlayer on API levels < 16
 			// https://github.com/google/ExoPlayer/issues/711
 			useExo = false;
-		}
+		//}
 
 		new Thread(new Runnable() {
 			@Override
@@ -481,6 +491,7 @@ public class PlayerService extends Service implements IStreamProxyEventReceiver 
 						itsMediaPlayer.setDataSource(proxyConnection);
 						itsMediaPlayer.prepare();
 						SetPlayStatus(PlayStatus.PrePlaying);
+						itsMediaPlayer.setVolume(1.0f, 1.0f);
 						itsMediaPlayer.start();
 						SetPlayStatus(PlayStatus.Playing);
 					} catch (IllegalArgumentException e) {
@@ -583,11 +594,25 @@ public class PlayerService extends Service implements IStreamProxyEventReceiver 
 
 	@Override
 	public void streamStopped() {
-		Stop();
+		internalStop();
 		ReplayCurrent(false);
 	}
 
-	public void Stop() {
+	private int registerAudioFocus() {
+		AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+		return audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC,
+				AudioManager.AUDIOFOCUS_GAIN);
+	}
+
+	private void releaseAudioFocus()	{
+		// Abandon audio focus when playback complete
+		AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+		audioManager.abandonAudioFocus(this);
+	}
+
+	// this does not release the audio focus
+	// needed since releasing cancels the listener
+	private void internalStop() {
 		Log.i(TAG,"stop()");
 		if (player != null){
 			player.stop();
@@ -637,5 +662,11 @@ public class PlayerService extends Service implements IStreamProxyEventReceiver 
 			}
 			wifiLock = null;
 		}
+	}
+
+	public void Stop() {
+		internalStop();
+		// only pressing the button should release the listener
+		releaseAudioFocus();
 	}
 }
